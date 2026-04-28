@@ -1,33 +1,11 @@
-name: Test Self-Hosted Runner
-
+name: Test Runner
 on:
-  # Memungkinkan lo buat jalanin manual dari tab Actions
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  check-connection:
-    name: Runner Connection Check
-    # Ganti 'self-hosted' dengan label spesifik lo jika ada
+  test:
     runs-on: self-hosted
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Who am I?
-        run: |
-          echo "User: $(whoami)"
-          echo "Hostname: $(hostname)"
-          echo "Current Directory: $(pwd)"
-
-      - name: Environment Check
-        run: |
-          echo "Node version:"
-          node -v || echo "Node not installed"
-          echo "Docker version:"
-          docker -v || echo "Docker not installed"
-
-      - name: Test Write Access
-        run: |
-          echo "Runner is working at $(date)" > test-file.txt
-          cat test-file.txt
+      - run: echo "Runner aman bos!"
