@@ -1,0 +1,59 @@
+name: Python DevSecOps CI/CD
+
+on:
+  push:
+    branches: [ "main" ] # Jalan otomatis kalau ada push ke branch main
+
+jobs:
+  build-test-deploy:
+    runs-on: self-hosted # Pastikan runner GitHub lu statusnya 'Idle' atau 'Online'
+    
+    steps:
+    - name: 1. Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 2. Secret & Leaks Scan
+      # Menggunakan Gitleaks untuk scan password/API Key yang bocor
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 3. Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 4. Install Dependencies & Tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Install tools untuk test dan security scan
+        pip install flake8 pytest bandit safety
+
+    - name: 5. Syntax Check (Linting)
+      # Flake8 akan ngecek error syntax dasar
+      run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+    - name: 6. Unit Test
+      # Jalanin test_app.py
+      run: pytest test_app.py
+
+    - name: 7. Code Security Scan (SAST)
+      # Bandit akan scan kode Python lu dari celah keamanan
+      run: bandit -r . -ll -ii -x ./tests,./test_app.py
+
+    - name: 8. Dependency Security Scan
+      # Safety akan ngecek apakah library di requirements.txt punya CVE (kerentanan)
+      run: safety check
+
+    - name: 9. Build Docker Image
+      run: docker build -t simple-python-app:latest .
+
+    - name: 10. Deploy Local (Self-Hosted)
+      run: |
+        # Stop dan hapus container lama kalau ada (biar gak error port bentrok)
+        docker stop my-python-web || true
+        docker rm my-python-web || true
+        
+        # Jalanin container baru di background (-d) di port 5000
+        docker run -d -p 5000:5000 --name my-python-web simple-python-app:latest
