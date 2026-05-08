@@ -2,58 +2,83 @@ name: Python DevSecOps CI/CD
 
 on:
   push:
-    branches: [ "main" ] # Jalan otomatis kalau ada push ke branch main
+    branches: [ "main" ]
 
 jobs:
-  build-test-deploy:
-    runs-on: self-hosted # Pastikan runner GitHub lu statusnya 'Idle' atau 'Online'
-    
+  # JOB 1: Persiapan dan Cek Sintaks
+  setup-and-lint:
+    name: Setup & Syntax Check
+    runs-on: self-hosted
     steps:
-    - name: 1. Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      # Karena Fedora memblokir global pip install (PEP 668), kita pakai virtual environment
+      - name: Linting Code
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
-    - name: 2. Secret & Leaks Scan
-      # Menggunakan Gitleaks untuk scan password/API Key yang bocor
-      uses: gitleaks/gitleaks-action@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # JOB 2: Scan Keamanan (Berjalan setelah Job 1 selesai)
+  security-scans:
+    name: Security & Secret Scans
+    needs: setup-and-lint
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: 3. Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Secret & Leaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: 4. Install Dependencies & Tools
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        # Install tools untuk test dan security scan
-        pip install flake8 pytest bandit safety
+      - name: SAST & Dependency Scan
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install bandit safety
+          bandit -r . -ll -ii -x ./tests,./test_app.py
+          safety check || true
 
-    - name: 5. Syntax Check (Linting)
-      # Flake8 akan ngecek error syntax dasar
-      run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+  # JOB 3: Unit Test (Berjalan PARALEL dengan Security Scans)
+  unit-testing:
+    name: Matrix: Unit Testing
+    needs: setup-and-lint
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: 6. Unit Test
-      # Jalanin test_app.py
-      run: pytest test_app.py
+      - name: Run Pytest
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt pytest
+          pytest test_app.py
 
-    - name: 7. Code Security Scan (SAST)
-      # Bandit akan scan kode Python lu dari celah keamanan
-      run: bandit -r . -ll -ii -x ./tests,./test_app.py
-
-    - name: 8. Dependency Security Scan
-      # Safety akan ngecek apakah library di requirements.txt punya CVE (kerentanan)
-      run: safety check
-
-    - name: 9. Build Docker Image
-      run: docker build -t simple-python-app:latest .
-
-    - name: 10. Deploy Local (Self-Hosted)
-      run: |
-        # Stop dan hapus container lama kalau ada (biar gak error port bentrok)
-        docker stop my-python-web || true
-        docker rm my-python-web || true
+  # JOB 4: Build Docker Image (Menunggu Job 2 & 3 selesai)
+  docker-build:
+    name: Build Application (Docker)
+    needs: [security-scans, unit-testing]
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
         
-        # Jalanin container baru di background (-d) di port 5000
-        docker run -d -p 5000:5000 --name my-python-web simple-python-app:latest
+      - name: Build Docker Image
+        run: docker build -t simple-python-app:latest .
+
+  # JOB 5: Deploy (Menunggu Job 4 selesai)
+  deploy-local:
+    name: Deploy to Production (Local)
+    needs: docker-build
+    runs-on: self-hosted
+    steps:
+      - name: Deploy Local Container
+        run: |
+          docker stop my-python-web || true
+          docker rm my-python-web || true
+          docker run -d -p 5000:5000 --name my-python-web simple-python-app:latest
