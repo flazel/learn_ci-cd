@@ -40,7 +40,9 @@ jobs:
       - name: Dependency Scan
         run: |
           source venv/bin/activate
-          safety check || true
+          # Install pip-audit
+          pip install pip-audit
+          pip-audit -r requirements.txt
 
   # ============================================
   # STAGE 2: Run Tests
