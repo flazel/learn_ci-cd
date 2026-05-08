@@ -1,84 +1,102 @@
-name: Python DevSecOps CI/CD
+name: Python CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
 
 jobs:
-  # JOB 1: Persiapan dan Cek Sintaks
-  setup-and-lint:
-    name: Setup & Syntax Check
+  # ============================================
+  # STAGE 1: Security & Code Quality
+  # ============================================
+  security-scan:
+    name: 🔒 Security & Code Scan
     runs-on: self-hosted
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      
-      # Karena Fedora memblokir global pip install (PEP 668), kita pakai virtual environment
-      - name: Linting Code
-        run: |
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install flake8
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-
-  # JOB 2: Scan Keamanan (Berjalan setelah Job 1 selesai)
-  security-scans:
-    name: Security & Secret Scans
-    needs: setup-and-lint
-    runs-on: self-hosted
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Secret & Leaks Scan
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: SAST & Dependency Scan
+      - name: Setup Virtual Env & Install Tools
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install bandit safety
+          pip install flake8 bandit safety
+
+      - name: Syntax Check (Linting)
+        run: |
+          source venv/bin/activate
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Code Security Scan (SAST)
+        run: |
+          source venv/bin/activate
           bandit -r . -ll -ii -x ./tests,./test_app.py
+
+      - name: Dependency Scan
+        run: |
+          source venv/bin/activate
           safety check || true
 
-  # JOB 3: Unit Test (Berjalan PARALEL dengan Security Scans)
-  unit-testing:
-    name: Matrix: Unit Testing
-    needs: setup-and-lint
+  # ============================================
+  # STAGE 2: Run Tests
+  # ============================================
+  test:
+    name: 🧪 Python Tests
     runs-on: self-hosted
+    needs: security-scan
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Run Pytest
+      - name: Install dependencies
         run: |
           python3 -m venv venv
           source venv/bin/activate
           pip install -r requirements.txt pytest
+
+      - name: Run Tests
+        run: |
+          source venv/bin/activate
           pytest test_app.py
 
-  # JOB 4: Build Docker Image (Menunggu Job 2 & 3 selesai)
-  docker-build:
-    name: Build Application (Docker)
-    needs: [security-scans, unit-testing]
+  # ============================================
+  # STAGE 3: Build Docker Image
+  # ============================================
+  build:
+    name: 🐳 Build Docker Image
     runs-on: self-hosted
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        
-      - name: Build Docker Image
-        run: docker build -t simple-python-app:latest .
+      - uses: actions/checkout@v4
 
-  # JOB 5: Deploy (Menunggu Job 4 selesai)
-  deploy-local:
-    name: Deploy to Production (Local)
-    needs: docker-build
+      - name: Build Docker Image
+        run: |
+          docker build \
+            -t simple-python-app:${{ github.sha }} \
+            -t simple-python-app:latest \
+            .
+
+  # ============================================
+  # STAGE 4: Deploy
+  # ============================================
+  deploy:
+    name: 🚀 Deploy
     runs-on: self-hosted
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Deploy Local Container
         run: |
           docker stop my-python-web || true
           docker rm my-python-web || true
           docker run -d -p 5000:5000 --name my-python-web simple-python-app:latest
+
+      - name: Health Check
+        run: |
+          sleep 5
+          curl -f http://localhost:5000/ || exit 1
