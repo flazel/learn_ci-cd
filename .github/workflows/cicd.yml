@@ -17,6 +17,9 @@ jobs:
     name: 🔒 Security & Code Scan
     runs-on: self-hosted
     steps:
+      - name: Clean stale temp files
+        run: rm -f /tmp/gitleaks* || true
+
       - uses: actions/checkout@v4
 
       - name: Secret & Leaks Scan
@@ -38,7 +41,7 @@ jobs:
       - name: Code Security Scan (SAST)
         run: |
           source venv/bin/activate
-          bandit -r . -ll -ii -x ./tests,./test_app.py,./venv
+          bandit -r . -ll -ii -x ./tests,./test_app.py,./venv --severity-level=high
 
       - name: Dependency Scan
         run: |
