@@ -1,6 +1,0 @@
-projectKey=belajar
-serverUrl=http://192.168.0.30:9000
-serverVersion=26.7.0.124771
-dashboardUrl=http://192.168.0.30:9000/dashboard?id=belajar
-ceTaskId=85e76f3a-ec11-473c-9e71-013c37442842
-ceTaskUrl=http://192.168.0.30:9000/api/ce/task?id=85e76f3a-ec11-473c-9e71-013c37442842
