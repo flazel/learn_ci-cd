@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  IMAGE_NAME: simple-python-app
+
 jobs:
   # ============================================
   # STAGE 1: Security & Code Quality
@@ -25,7 +28,7 @@ jobs:
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install flake8 bandit safety
+          pip install flake8 bandit safety pip-audit
 
       - name: Syntax Check (Linting)
         run: |
@@ -40,8 +43,6 @@ jobs:
       - name: Dependency Scan
         run: |
           source venv/bin/activate
-          # Install pip-audit
-          pip install pip-audit
           pip-audit -r requirements.txt
 
   # ============================================
@@ -66,39 +67,111 @@ jobs:
           pytest test_app.py
 
   # ============================================
-  # STAGE 3: Build Docker Image
+  # STAGE 3: Build, Scan & Push Docker Image
   # ============================================
   build:
-    name: 🐳 Build Docker Image
+    name: 🐳 Build & Push Docker Image
     runs-on: self-hosted
     needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Docker Image
         run: |
           docker build \
-            -t simple-python-app:${{ github.sha }} \
-            -t simple-python-app:latest \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             .
 
+      - name: Trivy Scan Image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+      - name: Push Docker Image (SHA tag)
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Tag & Push as environment-latest
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAG=production-latest
+          else
+            TAG=staging-latest
+          fi
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:$TAG
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:$TAG
+
   # ============================================
-  # STAGE 4: Deploy
+  # STAGE 4a: Deploy to Staging (develop branch)
   # ============================================
-  deploy:
-    name: 🚀 Deploy
+  deploy-staging:
+    name: 🚀 Deploy to Staging
     runs-on: self-hosted
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
     steps:
-      - name: Deploy Local Container
+      - name: Pull & Deploy
         run: |
-          docker stop my-python-web || true
-          docker rm my-python-web || true
-          docker run -d -p 5000:5000 --name my-python-web simple-python-app:latest
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker stop my-python-web-staging || true
+          docker rm my-python-web-staging || true
+          docker run -d -p 5001:5000 --name my-python-web-staging \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
       - name: Health Check
         run: |
           sleep 5
+          curl -f http://localhost:5001/ || exit 1
+
+  # ============================================
+  # STAGE 4b: Deploy to Production (main branch)
+  # ============================================
+  deploy-production:
+    name: 🚀 Deploy to Production
+    runs-on: self-hosted
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: Save currently running image tag (for rollback)
+        run: |
+          docker inspect --format='{{index .Config.Image}}' my-python-web > last_successful_image.txt 2>/dev/null || echo "none" > last_successful_image.txt
+          cat last_successful_image.txt
+
+      - name: Pull & Deploy
+        run: |
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker stop my-python-web || true
+          docker rm my-python-web || true
+          docker run -d -p 5000:5000 --name my-python-web \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Health Check
+        id: health_check
+        run: |
+          sleep 5
           curl -f http://localhost:5000/ || exit 1
+
+      - name: Rollback on Failure
+        if: failure() && steps.health_check.outcome == 'failure'
+        run: |
+          OLD_IMAGE=$(cat last_successful_image.txt)
+          if [ "$OLD_IMAGE" != "none" ]; then
+            echo "Health check failed, rolling back to $OLD_IMAGE"
+            docker stop my-python-web || true
+            docker rm my-python-web || true
+            docker run -d -p 5000:5000 --name my-python-web $OLD_IMAGE
+          else
+            echo "No previous image found, cannot rollback automatically"
+          fi
