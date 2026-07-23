@@ -43,7 +43,7 @@ jobs:
       - name: Code Security Scan (SAST)
         run: |
           source venv/bin/activate
-          bandit -r . -ll -ii -x ./tests,./test_app.py,./venv --severity-level=high
+          bandit -r . -ll -ii -x ./tests,./test_app.py,./venv
 
       - name: Dependency Scan
         run: |
