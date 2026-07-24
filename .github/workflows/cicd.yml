@@ -1,4 +1,4 @@
-name: Python CI/CD Pipeline
+name: Python CI/CD Pipeline (GitOps Edition)
 
 on:
   push:
@@ -8,13 +8,16 @@ on:
 
 env:
   IMAGE_NAME: simple-python-app
+  # Ganti USERNAME_KAMU dengan username Docker Hub & GitHub kamu
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  GITOPS_REPO: ${{ github.repository_owner }}/learn_ci-cd-gitops
 
 jobs:
   # ============================================
-  # STAGE 1: Security & Code Quality
+  # STAGE 1: Security, Code Quality & Tests
   # ============================================
-  security-scan:
-    name: 🔒 Security & Code Scan
+  code-quality-and-test:
+    name: 🔒 Quality, Security & Unit Tests
     runs-on: self-hosted
     steps:
       - name: Clean stale temp files
@@ -24,60 +27,42 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 1. Secret Scanning
       - name: Secret & Leaks Scan
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Virtual Env & Install Tools
+      # 2. Setup Env & Run Unit Tests
+      - name: Setup Virtual Env & Run Tests
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install flake8 bandit safety pip-audit
+          pip install -r requirements.txt pytest coverage
+          coverage run -m pytest test_app.py
+          coverage xml -o coverage.xml
 
-      - name: Syntax Check (Linting)
-        run: |
-          source venv/bin/activate
-          flake8 . --exclude=venv --count --select=E9,F63,F7,F82 --show-source --statistics
+      # 3. SonarQube Scan (Menggantikan Flake8 & Bandit)
+      - name: SonarQube Code Scan
+        uses: SonarSource/sonarqube-scan-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: Code Security Scan (SAST)
-        run: |
-          source venv/bin/activate
-          bandit -r . -ll -ii -x ./tests,./test_app.py,./venv
-
+      # 4. Dependency Security Scan
       - name: Dependency Scan
         run: |
           source venv/bin/activate
+          pip install pip-audit
           pip-audit -r requirements.txt
 
   # ============================================
-  # STAGE 2: Run Tests
+  # STAGE 2: Build, Scan & Push Docker Image
   # ============================================
-  test:
-    name: 🧪 Python Tests
+  build-and-push:
+    name: 🐳 Build, Scan & Push Docker Image
     runs-on: self-hosted
-    needs: security-scan
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install -r requirements.txt pytest
-
-      - name: Run Tests
-        run: |
-          source venv/bin/activate
-          pytest test_app.py
-
-  # ============================================
-  # STAGE 3: Build, Scan & Push Docker Image
-  # ============================================
-  build:
-    name: 🐳 Build & Push Docker Image
-    runs-on: self-hosted
-    needs: test
+    needs: code-quality-and-test
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v4
@@ -91,93 +76,75 @@ jobs:
       - name: Build Docker Image
         run: |
           docker build \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -t ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             .
 
       - name: Trivy Scan Image
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image-ref: ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
 
       - name: Push Docker Image (SHA tag)
         run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-      - name: Tag & Push as environment-latest
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            TAG=production-latest
-          else
-            TAG=staging-latest
-          fi
-          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:$TAG
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:$TAG
+          docker push ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
   # ============================================
-  # STAGE 4a: Deploy to Staging (develop branch)
+  # STAGE 3a: Deploy to Staging via GitOps
   # ============================================
   deploy-staging:
-    name: 🚀 Deploy to Staging
+    name: 🚀 Update GitOps Repo (Staging)
     runs-on: self-hosted
-    needs: build
+    needs: build-and-push
     if: github.ref == 'refs/heads/develop'
     environment: staging
     steps:
-      - name: Pull & Deploy
-        run: |
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          docker stop my-python-web-staging || true
-          docker rm my-python-web-staging || true
-          docker run -d -p 5001:5000 --name my-python-web-staging \
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      - name: Checkout GitOps Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops-repo
 
-      - name: Health Check
+      - name: Update Staging Image Tag & Push
         run: |
-          sleep 5
-          curl -f http://localhost:5001/ || exit 1
+          cd gitops-repo
+          # Update tag image di deployment-staging.yaml (atau file staging kamu)
+          sed -i 's|image: '${{ env.DOCKERHUB_USERNAME }}'/'${{ env.IMAGE_NAME }}':.*|image: '${{ env.DOCKERHUB_USERNAME }}'/'${{ env.IMAGE_NAME }}':'${{ github.sha }}'|g' deployment.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deployment.yaml
+          git commit -m "chore(staging): update image tag to ${{ github.sha }}" || echo "No changes to commit"
+          git push origin develop || git push origin main
 
   # ============================================
-  # STAGE 4b: Deploy to Production (main branch)
+  # STAGE 3b: Deploy to Production via GitOps
   # ============================================
   deploy-production:
-    name: 🚀 Deploy to Production
+    name: 🚀 Update GitOps Repo (Production)
     runs-on: self-hosted
-    needs: build
+    needs: build-and-push
     if: github.ref == 'refs/heads/main'
     environment: production
     steps:
-      - name: Save currently running image tag (for rollback)
-        run: |
-          docker inspect --format='{{index .Config.Image}}' my-python-web > last_successful_image.txt 2>/dev/null || echo "none" > last_successful_image.txt
-          cat last_successful_image.txt
+      - name: Checkout GitOps Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops-repo
 
-      - name: Pull & Deploy
+      - name: Update Production Image Tag & Push
         run: |
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          docker stop my-python-web || true
-          docker rm my-python-web || true
-          docker run -d -p 5000:5000 --name my-python-web \
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cd gitops-repo
+          # Update tag image di deployment.yaml dengan SHA commit baru
+          sed -i 's|image: '${{ env.DOCKERHUB_USERNAME }}'/'${{ env.IMAGE_NAME }}':.*|image: '${{ env.DOCKERHUB_USERNAME }}'/'${{ env.IMAGE_NAME }}':'${{ github.sha }}'|g' deployment.yaml
 
-      - name: Health Check
-        id: health_check
-        run: |
-          sleep 5
-          curl -f http://localhost:5000/ || exit 1
-
-      - name: Rollback on Failure
-        if: failure() && steps.health_check.outcome == 'failure'
-        run: |
-          OLD_IMAGE=$(cat last_successful_image.txt)
-          if [ "$OLD_IMAGE" != "none" ]; then
-            echo "Health check failed, rolling back to $OLD_IMAGE"
-            docker stop my-python-web || true
-            docker rm my-python-web || true
-            docker run -d -p 5000:5000 --name my-python-web $OLD_IMAGE
-          else
-            echo "No previous image found, cannot rollback automatically"
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deployment.yaml
+          git commit -m "chore(prod): update image tag to ${{ github.sha }}" || echo "No changes to commit"
+          git push origin main
