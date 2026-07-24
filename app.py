@@ -20,7 +20,7 @@ button:hover{background:#3a7dc9;}
 <body>
 <div class="card">
 <h1>CI/CD Pipeline Demo</h1>
-<p>Halo! Pipeline CI/CD Self-Hosted berhasil jalan!</p>
+<p>Halo! Pipeline CI/CD Self-Hosted berhasil jalan! By RIZALF</p>
 <button id="fetchBtn">Get Greeting</button>
 <div id="msg"></div>
 </div>
